@@ -15,8 +15,7 @@ Lokale RFID-Zeiterfassung für kleine Teams mit M5Stack M5Dial, PHP, Apache und 
 | `rfid-scan.php` | 1.2 | produktiver, idempotenter RFID-API-Endpunkt |
 | `auslagen/auslagen.php` | 1.1.3 | integrierte Auslagen- und Kilometerverwaltung mit eigener SQLite-Datenbank |
 | `installer.sh` | 1.6.6 | GitHub-Bootstrap, Installation und additive Aktualisierung unter Debian/Ubuntu mit Apache |
-| `kienzlezeit_v1.4/kienzlezeit_v1.4.ino` | 1.4 | aktuelle M5Dial-Firmware mit wählbarem HTTP/HTTPS und optimierter Anzeige |
-| `kienzlezeit_rfid-scan_test_v0.2.php` | 0.2 | einfacher Testendpunkt ohne Datenbank |
+| `kienzlezeit_v1.4.ino` | 1.4 | aktuelle M5Dial-Firmware mit wählbarem HTTP/HTTPS und optimierter Anzeige |
 
 ## Funktionsumfang
 
@@ -151,7 +150,7 @@ Offizielle M5Dial-Anleitung: [M5Dial kompilieren und hochladen](https://docs.m5s
 
 ### 3. Firmware konfigurieren
 
-`kienzlezeit_v1.4/kienzlezeit_v1.4.ino` öffnen und im Konfigurationsabschnitt anpassen:
+`kienzlezeit_v1.4.ino` im Projektstamm öffnen und im Konfigurationsabschnitt anpassen:
 
 ```cpp
 static const char *WIFI_SSID     = "MEIN-WLAN";
