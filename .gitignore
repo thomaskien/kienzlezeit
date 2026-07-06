@@ -1,0 +1,28 @@
+# Betriebssystem und Editoren
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Lokale Konfiguration und Geheimnisse
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Datenbanken und SQLite-Laufzeitdateien
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.wal
+*.shm
+
+# Sicherungen und Laufzeitdaten
+backup/
+backups/
+*.bak
+
+# Interne Arbeitsnotizen
+auslagen/CODEX_HANDOFF_AUSLAGEN.md
