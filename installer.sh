@@ -2,12 +2,16 @@
 #
 # kienzlezeit – Installer fuer Apache/SQLite
 #
-# Installer-Version: 1.6.6
-# Anwendungs-Version: 1.6.5
+# Installer-Version: 1.6.7
+# Anwendungs-Version: 1.6.6
 # Author: Dr. Thomas Kienzle
-# Stand: 2026-07-06
+# Stand: 2026-07-08
 #
 # Changelog (komplett):
+# - Installer 1.6.7 (2026-07-08):
+#   - Installiert kienzlezeit 1.6.6 mit neu geordnetem Admin-Menue.
+#   - Installiert die stichtagsbezogene Monatsuebersicht aller aktiven Mitarbeitenden.
+#
 # - Installer 1.6.6 (2026-07-06):
 #   - Kann als einzelne Datei gestartet werden und laedt die benoetigten
 #     Anwendungsdateien direkt aus dem GitHub-Repository nach.
@@ -78,8 +82,8 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.6.6"
-APP_VERSION="1.6.5"
+INSTALLER_VERSION="1.6.7"
+APP_VERSION="1.6.6"
 APP_AUTHOR="Dr. Thomas Kienzle"
 GITHUB_REPOSITORY="thomaskien/kienzlezeit"
 SOURCE_REF="${KIENZLEZEIT_REF:-main}"

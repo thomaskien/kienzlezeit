@@ -3,11 +3,17 @@
  * kienzlezeit.php
  * Lokale RFID-Zeiterfassung, Mitarbeiter- und Adminoberflaeche.
  *
- * Version: 1.6.5
+ * Version: 1.6.6
  * Author: Dr. Thomas Kienzle
- * Stand: 2026-07-06
+ * Stand: 2026-07-08
  *
  * Changelog (komplett):
+ * - 1.6.6 (2026-07-08):
+ *   - Admin-Menue logisch neu geordnet und Auswertung einheitlich benannt.
+ *   - Feiertagsverwaltung von Auswertung nach Planung verschoben.
+ *   - Neue stichtagsbezogene Monatsuebersicht aller aktiven Mitarbeitenden in Web, PDF und CSV.
+ *   - Gesamt- und Monatssalden, Urlaub sowie Jahres-Abwesenheitstage werden gemeinsam ausgewiesen.
+ *
  * - 1.6.5 (2026-07-06):
  *   - Administrativ gesetzte Tagesarbeitszeiten schliessen offene Altbuchungen am RFID-Terminal ab.
  *   - Nach dem Abschluss wird die naechste Kartenbuchung korrekt wieder als Kommen behandelt.
@@ -94,7 +100,7 @@
 declare(strict_types=1);
 
 const KZ_APP_TITLE = 'kienzlezeit';
-const KZ_APP_VERSION = '1.6.5';
+const KZ_APP_VERSION = '1.6.6';
 const KZ_APP_AUTHOR = 'Dr. Thomas Kienzle';
 const KZ_SCHEMA_VERSION = 3;
 const KZ_DEFAULT_DB = '/var/lib/kienzlezeit/kienzlezeit.sqlite';
@@ -1171,6 +1177,40 @@ function kz_sickness_days(int $employeeId, int $year): float
     return $days;
 }
 
+function kz_absence_days_by_type_until(int $employeeId, int $year, string $throughExclusive): array
+{
+    $result = ['ILLNESS'=>0.0,'TRAINING'=>0.0,'OTHER'=>0.0,'UNPAID'=>0.0];
+    $statement = kz_db()->prepare("SELECT at.type_code,COALESCE(SUM(CASE WHEN ad.day_part='FULL_DAY' THEN 1.0 ELSE 0.5 END),0) AS days FROM absence_days ad JOIN absence_requests ar ON ar.id=ad.request_id JOIN absence_types at ON at.id=ar.absence_type_id WHERE ad.employee_id=? AND ad.work_date>=? AND ad.work_date<? AND ar.status='APPROVED' AND at.type_code IN ('ILLNESS','TRAINING','OTHER','UNPAID') GROUP BY at.type_code");
+    $statement->execute([$employeeId,sprintf('%04d-01-01',$year),$throughExclusive]);
+    foreach($statement as $row)$result[(string)$row['type_code']]=(float)$row['days'];
+    return $result;
+}
+
+function kz_team_month_overview(int $year, int $month): array
+{
+    $year=max(2000,min(2100,$year));$month=max(1,min(12,$month));
+    $timezone=new DateTimeZone('Europe/Berlin');
+    $monthStart=new DateTimeImmutable(sprintf('%04d-%02d-01',$year,$month),$timezone);
+    $currentMonth=(new DateTimeImmutable(kz_today(),$timezone))->modify('first day of this month');
+    if($monthStart>$currentMonth){$monthStart=$currentMonth;$year=(int)$monthStart->format('Y');$month=(int)$monthStart->format('n');}
+    $monthEnd=$monthStart->modify('first day of next month');$today=new DateTimeImmutable(kz_today(),$timezone);
+    $throughExclusive=$monthEnd<$today?$monthEnd:$today;
+    $cutoffLabel=$throughExclusive>$monthStart?$throughExclusive->modify('-1 day')->format('d.m.Y'):'noch kein abgeschlossener Tag';
+    $employees=kz_db()->query('SELECT * FROM employees WHERE active=1 ORDER BY full_name,name')->fetchAll();$rows=[];
+    foreach($employees as $employee){
+        $employeeId=(int)$employee['id'];$report=kz_month_report($employeeId,$year,$month);$monthBalance=0;
+        foreach($report['days'] as $day)if($day['date']<$throughExclusive->format('Y-m-d'))$monthBalance+=(int)$day['balance'];
+        $vacation=kz_vacation_balance($employeeId,$year);$absence=kz_absence_days_by_type_until($employeeId,$year,$throughExclusive->format('Y-m-d'));
+        $rows[]=['employee'=>$employee,'total_balance'=>kz_total_balance($employeeId,$throughExclusive->format('Y-m-d')),'month_balance'=>$monthBalance,'vacation_total'=>(float)$vacation['total'],'vacation_used'=>(float)$vacation['used'],'vacation_remaining'=>(float)$vacation['remaining'],'illness'=>$absence['ILLNESS'],'training'=>$absence['TRAINING'],'other'=>$absence['OTHER'],'unpaid'=>$absence['UNPAID']];
+    }
+    return ['year'=>$year,'month'=>$month,'month_start'=>$monthStart->format('Y-m-d'),'through_exclusive'=>$throughExclusive->format('Y-m-d'),'cutoff_label'=>$cutoffLabel,'rows'=>$rows];
+}
+
+function kz_days_label(float $days): string
+{
+    return number_format($days,1,',','.');
+}
+
 function kz_total_balance(int $employeeId, ?string $throughExclusive=null): int
 {
     $throughExclusive ??= kz_today();
@@ -1704,6 +1744,13 @@ function kz_handle_export(string $type): never
         $pdfWidths=[.8,1.2,.9,.5,1.7,.7,.7,.7,.7,1.2];
         $filename = 'kienzlezeit-monat-' . $employee['personnel_number'] . '-' . sprintf('%04d-%02d', $year, $month);
         $db->prepare('INSERT INTO export_log(admin_user_id,export_type,export_format,period_label,employee_scope,created_at) VALUES(?,?,?,?,?,?)')->execute([(int) $_SESSION['admin_id'], 'MONTH', strtoupper($format), sprintf('%04d-%02d', $year, $month), (string) $employeeId, kz_now_utc()]);
+    } elseif ($type === 'team_month_summary') {
+        kz_require_admin();$overview=kz_team_month_overview($year,$month);$year=(int)$overview['year'];$month=(int)$overview['month'];
+        $rows[]=['Mitarbeiter','Gesamtsaldo','Monatssaldo','Urlaub gesamt','genommen/geplant','Resturlaub','Krankheit','Fortbildung','Sonstige','Unbezahlt frei'];
+        foreach($overview['rows'] as $row){$employee=$row['employee'];$name=(string)($employee['full_name']?:$employee['name']);if(trim((string)$employee['personnel_number'])!=='')$name.=' · '.$employee['personnel_number'];$rows[]=[$name,kz_minutes_label((int)$row['total_balance'],true),kz_minutes_label((int)$row['month_balance'],true),kz_days_label((float)$row['vacation_total']),kz_days_label((float)$row['vacation_used']),kz_days_label((float)$row['vacation_remaining']),kz_days_label((float)$row['illness']),kz_days_label((float)$row['training']),kz_days_label((float)$row['other']),kz_days_label((float)$row['unpaid'])];}
+        $pdfTitle='Mitarbeiterübersicht · '.sprintf('%02d/%04d',$month,$year);$pdfSummary=['Berechnungsstand: '.$overview['cutoff_label'].' · Zeiten nur aus abgeschlossenen Tagen.','Urlaub genommen/geplant enthält alle genehmigten Urlaubstage des Jahres. Abwesenheiten: '.$year.' bis zum Berechnungsstand.'];$pdfWidths=[1.8,.95,.95,1,1.25,.75,.75,.9,.7,1.1];
+        $filename='kienzlezeit-mitarbeiteruebersicht-'.sprintf('%04d-%02d',$year,$month);
+        $db->prepare('INSERT INTO export_log(admin_user_id,export_type,export_format,period_label,employee_scope,created_at) VALUES(?,?,?,?,?,?)')->execute([(int)$_SESSION['admin_id'],'TEAM_MONTH_SUMMARY',strtoupper($format),sprintf('%04d-%02d',$year,$month),'ACTIVE',kz_now_utc()]);
     } elseif ($type === 'annual_targets') {
         kz_require_admin();
         $employees = [];
@@ -2508,7 +2555,7 @@ function kz_render_header(string $title, string $context = 'public'): void
   </header>
   <?php if ($admin): ?>
   <nav class="nav" aria-label="Admin-Navigation">
-    <a href="?page=admin-dashboard">Übersicht</a><a href="?page=admin-employees">Mitarbeiter</a><a href="?page=admin-schedules">Planung</a><a href="?page=admin-attendance">Zeiten</a><a href="?page=admin-absences">Abwesenheiten</a><?php if(kz_expenses_enabled()):?><a href="<?=kz_h(kz_expenses_url(true))?>">Auslagen</a><?php endif;?><a href="?page=admin-cards">Karten &amp; Terminals</a><a href="?page=admin-exports">Auswertungen</a><a href="?page=admin-settings">Administration</a>
+    <a href="?page=admin-dashboard">Übersicht</a><a href="?page=admin-employees">Mitarbeiter</a><a href="?page=admin-attendance">Zeiten</a><a href="?page=admin-absences">Abwesenheiten</a><a href="?page=admin-exports">Auswertung</a><a href="?page=admin-schedules">Planung</a><a href="?page=admin-cards">Karten &amp; Terminals</a><?php if(kz_expenses_enabled()):?><a href="<?=kz_h(kz_expenses_url(true))?>">Auslagen</a><?php endif;?><a href="?page=admin-settings">Administration</a>
   </nav>
   <?php elseif ($employee): ?>
   <nav class="nav" aria-label="Mitarbeiter-Navigation"><a href="?page=employee-dashboard">Übersicht</a><a href="?page=employee-times">Meine Zeiten</a><a href="?page=employee-absences">Abwesenheiten</a><?php if(kz_expenses_enabled()):?><a href="<?=kz_h(kz_expenses_url())?>">Auslagen</a><?php endif;?></nav>
@@ -2782,9 +2829,9 @@ function kz_render_admin_schedules(): void
     $employee=null;foreach($employees as $e){if((int)$e['id']===$employeeId)$employee=$e;}
     $history=[];$currentParts=[];if($employeeId){$s=$db->prepare('SELECT * FROM work_schedules WHERE employee_id=? ORDER BY valid_from DESC');$s->execute([$employeeId]);$history=$s->fetchAll();$schedule=kz_schedule_for_date($employeeId,kz_today());if($schedule){$s=$db->prepare('SELECT * FROM work_schedule_day_parts WHERE schedule_id=?');$s->execute([(int)$schedule['id']]);foreach($s as $r)$currentParts[(int)$r['weekday']][$r['day_part']]=(int)$r['target_minutes'];}}
     $days=[1=>'Montag',2=>'Dienstag',3=>'Mittwoch',4=>'Donnerstag',5=>'Freitag',6=>'Samstag',7=>'Sonntag'];$opening=kz_opening_hours();
-    kz_render_header('Sollzeiten','admin');
+    kz_render_header('Planung','admin');
     ?>
-    <div class="inline"><h1>Sollzeiten</h1><form method="get" class="inline auto"><input type="hidden" name="page" value="admin-schedules"><select name="employee_id" onchange="this.form.submit()"><?php foreach($employees as $e):?><option value="<?=(int)$e['id']?>" <?=(int)$e['id']===$employeeId?'selected':''?>><?=kz_h($e['name'])?></option><?php endforeach;?></select></form></div>
+    <div class="inline"><h1>Planung</h1><a class="btn secondary auto" href="?page=admin-holidays">Feiertage verwalten</a><form method="get" class="inline auto"><input type="hidden" name="page" value="admin-schedules"><select name="employee_id" onchange="this.form.submit()"><?php foreach($employees as $e):?><option value="<?=(int)$e['id']?>" <?=(int)$e['id']===$employeeId?'selected':''?>><?=kz_h($e['name'])?></option><?php endforeach;?></select></form></div>
     <?php if(!$employee):?><div class="card empty">Bitte zuerst einen Mitarbeiter anlegen.</div><?php else:?><div class="grid"><section class="card col-8"><h2>Neuer Sollplan für <?=kz_h($employee['name'])?></h2><p class="muted">Dauer je Tagesabschnitt in Stunden und Minuten. 00:00 bedeutet frei. Der bisherige Plan bleibt historisch erhalten.</p><form method="post" id="schedule-form"><?php kz_hidden_action('schedule_save');?><input type="hidden" name="employee_id" value="<?=$employeeId?>"><div class="inline"><div class="field"><label>Gültig ab</label><input type="date" name="valid_from" value="<?=kz_h(kz_today())?>" required></div><button type="button" id="copy-opening" class="secondary auto">Öffnungszeiten übernehmen</button></div><div class="table-wrap"><table class="schedule-grid"><thead><tr><th>Wochentag</th><th>Vormittag (Std.:Min.)</th><th>Nachmittag (Std.:Min.)</th></tr></thead><tbody><?php foreach($days as $n=>$label):$m=$opening[$n]['MORNING']??null;$a=$opening[$n]['AFTERNOON']??null;$mMin=$m&&$m['start_time']&&$m['end_time']?(strtotime($m['end_time'])-strtotime($m['start_time']))/60:0;$aMin=$a&&$a['start_time']&&$a['end_time']?(strtotime($a['end_time'])-strtotime($a['start_time']))/60:0;?><tr><td><?=$label?></td><td><input type="time" min="00:00" max="12:00" step="300" name="d<?=$n?>_morning" data-opening="<?=kz_h(kz_duration_input((int)$mMin))?>" value="<?=kz_h(kz_duration_input((int)($currentParts[$n]['MORNING']??0)))?>"></td><td><input type="time" min="00:00" max="12:00" step="300" name="d<?=$n?>_afternoon" data-opening="<?=kz_h(kz_duration_input((int)$aMin))?>" value="<?=kz_h(kz_duration_input((int)($currentParts[$n]['AFTERNOON']??0)))?>"></td></tr><?php endforeach;?></tbody></table></div><button style="margin-top:14px">Neuen Sollplan speichern</button></form></section>
     <section class="card col-4"><h2>Historie</h2><?php foreach($history as $schedule):?><div style="padding:10px 0;border-bottom:1px solid var(--line)"><strong><?=kz_h((new DateTimeImmutable($schedule['valid_from']))->format('d.m.Y'))?></strong> bis <?=kz_h($schedule['valid_until']?(new DateTimeImmutable($schedule['valid_until']))->format('d.m.Y'):'offen')?><br><span class="muted"><?=kz_h(kz_minutes_label((int)$schedule['weekly_target_minutes']))?> Stunden/Woche</span></div><?php endforeach;?><?php if(!$history):?><p class="muted">Noch kein Sollplan.</p><?php endif;?></section></div><?php endif;?>
     <section class="card" style="margin-top:18px"><h2>Öffnungszeiten</h2><p class="muted">Globale Vorlage. Die Übernahme in einen persönlichen Sollplan erfolgt erst über den obigen Knopf und anschließendes Speichern.</p><form method="post"><?php kz_hidden_action('opening_hours_save');?><div class="table-wrap"><table><thead><tr><th>Tag</th><th>Vormittag von</th><th>bis</th><th>Nachmittag von</th><th>bis</th></tr></thead><tbody><?php foreach($days as $n=>$label):?><tr><td><strong><?=$label?></strong></td><?php foreach(['MORNING','AFTERNOON'] as $part):$field=strtolower($part);$field=$part==='MORNING'?'morning':'afternoon';$row=$opening[$n][$part]??[];?><td><input type="time" name="d<?=$n?>_<?=$field?>_start" value="<?=kz_h($row['start_time']??'')?>"></td><td><input type="time" name="d<?=$n?>_<?=$field?>_end" value="<?=kz_h($row['end_time']??'')?>"></td><?php endforeach;?></tr><?php endforeach;?></tbody></table></div><button style="margin-top:14px">Öffnungszeiten speichern</button></form></section><script>document.getElementById('copy-opening')?.addEventListener('click',()=>{document.querySelectorAll('#schedule-form [data-opening]').forEach(input=>input.value=input.dataset.opening);});</script>
@@ -2889,11 +2936,18 @@ function kz_render_admin_users(): void
 function kz_render_admin_exports(): void
 {
     kz_require_admin();$db=kz_db();$employees=$db->query('SELECT * FROM employees ORDER BY name')->fetchAll();
-    kz_render_header('Exporte','admin');
+    $overview=kz_team_month_overview((int)($_GET['year']??date('Y')),(int)($_GET['month']??date('n')));$year=(int)$overview['year'];$month=(int)$overview['month'];
+    kz_render_header('Auswertung','admin');
     ?>
-    <div class="inline" style="margin-bottom:12px"><a class="btn secondary auto" href="?page=admin-holidays">Feiertage verwalten</a></div>
-    <h1>Exporte</h1><div class="grid"><section class="card col-6"><h2>Monatsnachweis</h2><p class="muted">Kommen, Gehen, Gutschriften, Soll-, Ist- und Saldozeiten.</p><form method="get"><input type="hidden" name="action" value="export_admin_month"><div class="field"><label>Mitarbeiter</label><select name="employee_id"><?php foreach($employees as $e):?><option value="<?=(int)$e['id']?>"><?=kz_h($e['name'])?></option><?php endforeach;?></select></div><div class="inline"><div class="field"><label>Monat</label><input type="number" name="month" min="1" max="12" value="<?=date('n')?>"></div><div class="field"><label>Jahr</label><input type="number" name="year" min="2000" max="2100" value="<?=date('Y')?>"></div><div class="field"><label>Format</label><select name="format"><option value="pdf">PDF</option><option value="csv">CSV</option></select></div></div><button>Export erzeugen</button></form></section>
-    <section class="card col-6 accent"><h2>Personendaten und Sollzeiten</h2><p class="muted">Datensparsamer Jahresabschluss ohne Buchungen, RFID-Daten oder Abwesenheitsgründe.</p><form method="get"><input type="hidden" name="action" value="export_annual_targets"><div class="field"><label>Mitarbeiter</label><select name="employee_id"><option value="0">Alle Mitarbeiter</option><?php foreach($employees as $e):?><option value="<?=(int)$e['id']?>"><?=kz_h($e['name'])?></option><?php endforeach;?></select></div><div class="inline"><div class="field"><label>Jahr</label><input type="number" name="year" min="2000" max="2100" value="<?=date('Y')?>"></div><div class="field"><label>Format</label><select name="format"><option value="pdf">PDF</option><option value="csv">CSV</option></select></div></div><button>Jahresdaten exportieren</button></form></section></div>
+    <h1>Auswertung</h1>
+    <div class="grid"><section class="card col-6"><h2>Monatsnachweis</h2><p class="muted">Kommen, Gehen, Gutschriften, Soll-, Ist- und Saldozeiten.</p><form method="get"><input type="hidden" name="action" value="export_admin_month"><div class="field"><label>Mitarbeiter</label><select name="employee_id"><?php foreach($employees as $e):?><option value="<?=(int)$e['id']?>"><?=kz_h($e['name'])?></option><?php endforeach;?></select></div><div class="inline"><div class="field"><label>Monat</label><input type="number" name="month" min="1" max="12" value="<?=$month?>"></div><div class="field"><label>Jahr</label><input type="number" name="year" min="2000" max="2100" value="<?=$year?>"></div><div class="field"><label>Format</label><select name="format"><option value="pdf">PDF</option><option value="csv">CSV</option></select></div></div><button>Export erzeugen</button></form></section>
+    <section class="card col-6 accent"><h2>Personendaten und Sollzeiten</h2><p class="muted">Datensparsamer Jahresabschluss ohne Buchungen, RFID-Daten oder Abwesenheitsgründe.</p><form method="get"><input type="hidden" name="action" value="export_annual_targets"><div class="field"><label>Mitarbeiter</label><select name="employee_id"><option value="0">Alle Mitarbeiter</option><?php foreach($employees as $e):?><option value="<?=(int)$e['id']?>"><?=kz_h($e['name'])?></option><?php endforeach;?></select></div><div class="inline"><div class="field"><label>Jahr</label><input type="number" name="year" min="2000" max="2100" value="<?=$year?>"></div><div class="field"><label>Format</label><select name="format"><option value="pdf">PDF</option><option value="csv">CSV</option></select></div></div><button>Jahresdaten exportieren</button></form></section>
+    <section class="card col-12"><div class="inline"><div><h2>Mitarbeiterübersicht <?=sprintf('%02d/%04d',$month,$year)?></h2><p class="muted">Berechnungsstand: <?=kz_h($overview['cutoff_label'])?>. Zeiten werden entsprechend der Tagesabschlussregel nur aus abgeschlossenen Tagen berechnet.</p></div><form method="get" class="inline auto no-print"><input type="hidden" name="page" value="admin-exports"><div class="field"><label>Monat</label><input type="number" name="month" min="1" max="12" value="<?=$month?>"></div><div class="field"><label>Jahr</label><input type="number" name="year" min="2000" max="2100" value="<?=$year?>"></div><button class="secondary auto">Anzeigen</button></form></div>
+      <div class="inline no-print" style="margin-bottom:14px"><a class="btn secondary auto" href="?action=export_team_month_summary&amp;format=pdf&amp;year=<?=$year?>&amp;month=<?=$month?>">PDF</a><a class="btn secondary auto" href="?action=export_team_month_summary&amp;format=csv&amp;year=<?=$year?>&amp;month=<?=$month?>">CSV</a><span class="muted">Urlaub genommen/geplant berücksichtigt alle genehmigten Urlaubstage des Jahres.</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Mitarbeiter</th><th>Gesamtsaldo</th><th>Monatssaldo</th><th>Urlaub gesamt</th><th>genommen / geplant</th><th>Resturlaub</th><th>Krankheit <?=$year?></th><th>Fortbildung <?=$year?></th><th>Sonstige <?=$year?></th><th>Unbezahlt frei <?=$year?></th></tr></thead><tbody>
+      <?php foreach($overview['rows'] as $row):$employee=$row['employee'];?><tr><td><strong><?=kz_h($employee['full_name']?:$employee['name'])?></strong><br><small class="muted"><?=kz_h($employee['personnel_number'])?></small></td><td class="nowrap"><?=kz_h(kz_minutes_label((int)$row['total_balance'],true))?></td><td class="nowrap"><?=kz_h(kz_minutes_label((int)$row['month_balance'],true))?></td><td><?=kz_h(kz_days_label((float)$row['vacation_total']))?></td><td><?=kz_h(kz_days_label((float)$row['vacation_used']))?></td><td><?=kz_h(kz_days_label((float)$row['vacation_remaining']))?></td><td><?=kz_h(kz_days_label((float)$row['illness']))?></td><td><?=kz_h(kz_days_label((float)$row['training']))?></td><td><?=kz_h(kz_days_label((float)$row['other']))?></td><td><?=kz_h(kz_days_label((float)$row['unpaid']))?></td></tr><?php endforeach;?>
+      <?php if(!$overview['rows']):?><tr><td colspan="10" class="empty">Keine aktiven Mitarbeiter vorhanden.</td></tr><?php endif;?></tbody></table></div>
+    </section></div>
     <?php kz_render_footer();
 }
 
