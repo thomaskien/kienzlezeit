@@ -3,11 +3,15 @@
  * kienzlezeit.php
  * Lokale RFID-Zeiterfassung, Mitarbeiter- und Adminoberflaeche.
  *
- * Version: 1.6.6
+ * Version: 1.6.7
  * Author: Dr. Thomas Kienzle
- * Stand: 2026-07-08
+ * Stand: 2026-07-18
  *
  * Changelog (komplett):
+ * - 1.6.7 (2026-07-18):
+ *   - RFID-Buchungen nach fehlender Ausbuchung werden gespeichert statt blockiert.
+ *   - Das Terminal meldet die gespeicherte Buchung mit sichtbarer Inkonsistenz-Warnung.
+ *
  * - 1.6.6 (2026-07-08):
  *   - Admin-Menue logisch neu geordnet und Auswertung einheitlich benannt.
  *   - Feiertagsverwaltung von Auswertung nach Planung verschoben.
@@ -100,7 +104,7 @@
 declare(strict_types=1);
 
 const KZ_APP_TITLE = 'kienzlezeit';
-const KZ_APP_VERSION = '1.6.6';
+const KZ_APP_VERSION = '1.6.7';
 const KZ_APP_AUTHOR = 'Dr. Thomas Kienzle';
 const KZ_SCHEMA_VERSION = 3;
 const KZ_DEFAULT_DB = '/var/lib/kienzlezeit/kienzlezeit.sqlite';

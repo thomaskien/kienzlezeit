@@ -4,17 +4,17 @@
 
 Lokale RFID-Zeiterfassung für kleine Teams mit M5Stack M5Dial, PHP, Apache und SQLite. Das System läuft ohne Cloud-Zwang im eigenen Netzwerk.
 
-**Aktueller Stand:** 8. Juli 2026<br>
+**Aktueller Stand:** 18. Juli 2026<br>
 **Autor:** Dr. Thomas Kienzle
 
 ## Versionsstand
 
 | Komponente | Version | Aufgabe |
 |---|---:|---|
-| `kienzlezeit.php` | 1.6.6 | Mitarbeiter- und Adminoberfläche, Datenmodell und Auswertungen |
-| `rfid-scan.php` | 1.2 | produktiver, idempotenter RFID-API-Endpunkt |
+| `kienzlezeit.php` | 1.6.7 | Mitarbeiter- und Adminoberfläche, Datenmodell und Auswertungen |
+| `rfid-scan.php` | 1.3 | produktiver, idempotenter RFID-API-Endpunkt |
 | `auslagen/auslagen.php` | 1.1.3 | integrierte Auslagen- und Kilometerverwaltung mit eigener SQLite-Datenbank |
-| `installer.sh` | 1.6.7 | GitHub-Bootstrap, Installation und additive Aktualisierung unter Debian/Ubuntu mit Apache |
+| `installer.sh` | 1.6.8 | GitHub-Bootstrap, Installation und additive Aktualisierung unter Debian/Ubuntu mit Apache |
 | `kienzlezeit_v1.4.ino` | 1.4 | aktuelle M5Dial-Firmware mit wählbarem HTTP/HTTPS und optimierter Anzeige |
 
 ## Funktionsumfang
@@ -30,6 +30,8 @@ Lokale RFID-Zeiterfassung für kleine Teams mit M5Stack M5Dial, PHP, Apache und 
 - Mitarbeiter-Korrekturanträge, zusätzliche Vertretungsanwesenheiten und administrative Buchungsprüfung.
   Prüfhinweise können mit einer vorbelegten oder frei eingetragenen Tagesarbeitszeit abgeschlossen werden.
   Ein so abgeschlossener alter Tag blockiert anschließend keine neue Buchung am RFID-Terminal.
+- Fehlt eine Ausbuchung aus einem Vortag, wird die nächste Terminalbuchung trotzdem gespeichert
+  und mit einer sichtbaren Inkonsistenz-Warnung beantwortet.
 - Gesamtsalden mit nachvollziehbarem Startsaldo, Urlaub und Krankheit in der Mitarbeiterübersicht.
 - Persönliche Übersicht mit Arbeitszeit/Ist-Soll, tagesaktuellem Monatssaldo, Resturlaub und Gesamt-Stunden-Saldo.
 - Historisierte Öffnungszeiten als übernehmbare Vorlage für persönliche Sollzeiten.
@@ -108,7 +110,7 @@ http://SERVER-IP/kienzlezeit.php
 
 Beim ersten Adminlogin muss das Übergangspasswort geändert werden. Den ausgegebenen Terminal-Key sicher aufbewahren; er wird in der Firmware benötigt und kann später im Adminbereich angezeigt oder ersetzt werden.
 
-Der Installer 1.6.7 richtet noch kein Apache-Zertifikat und keinen HTTPS-VirtualHost ein. Soll Firmware 1.4 HTTPS verwenden, muss der Server bereits unter einer `https://`-Adresse erreichbar sein; selbstsignierte Zertifikate sind zulässig. HTTP kann alternativ weiterhin gezielt konfiguriert werden.
+Der Installer 1.6.8 richtet noch kein Apache-Zertifikat und keinen HTTPS-VirtualHost ein. Soll Firmware 1.4 HTTPS verwenden, muss der Server bereits unter einer `https://`-Adresse erreichbar sein; selbstsignierte Zertifikate sind zulässig. HTTP kann alternativ weiterhin gezielt konfiguriert werden.
 
 ### Auslagenverwaltung aktivieren
 

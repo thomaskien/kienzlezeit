@@ -2,12 +2,16 @@
 #
 # kienzlezeit – Installer fuer Apache/SQLite
 #
-# Installer-Version: 1.6.7
-# Anwendungs-Version: 1.6.6
+# Installer-Version: 1.6.8
+# Anwendungs-Version: 1.6.7
 # Author: Dr. Thomas Kienzle
-# Stand: 2026-07-08
+# Stand: 2026-07-18
 #
 # Changelog (komplett):
+# - Installer 1.6.8 (2026-07-18):
+#   - Installiert kienzlezeit 1.6.7 und den RFID-Endpunkt 1.3.
+#   - Neue Buchungen werden trotz erkannter fehlender Ausbuchung gespeichert und gewarnt.
+#
 # - Installer 1.6.7 (2026-07-08):
 #   - Installiert kienzlezeit 1.6.6 mit neu geordnetem Admin-Menue.
 #   - Installiert die stichtagsbezogene Monatsuebersicht aller aktiven Mitarbeitenden.
@@ -82,8 +86,8 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.6.7"
-APP_VERSION="1.6.6"
+INSTALLER_VERSION="1.6.8"
+APP_VERSION="1.6.7"
 APP_AUTHOR="Dr. Thomas Kienzle"
 GITHUB_REPOSITORY="thomaskien/kienzlezeit"
 SOURCE_REF="${KIENZLEZEIT_REF:-main}"

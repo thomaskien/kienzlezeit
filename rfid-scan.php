@@ -3,11 +3,15 @@
  * rfid-scan.php
  * Schlanker, idempotenter RFID-Endpunkt fuer kienzlezeit.
  *
- * Version: 1.2
+ * Version: 1.3
  * Author: Dr. Thomas Kienzle
- * Stand: 2026-07-06
+ * Stand: 2026-07-18
  *
  * Changelog (komplett):
+ * - 1.3 (2026-07-18):
+ *   - Offene Altbuchungen blockieren neue Terminalbuchungen nicht mehr.
+ *   - Bei erkannter Inkonsistenz wird die neue Buchung gespeichert und als Warnung angezeigt.
+ *
  * - 1.2 (2026-07-06):
  *   - Administrativ gesetzte Tagesarbeitszeiten schliessen offene Altbuchungen auch am Terminal ab.
  *   - Die naechste Buchung nach einem solchen Tagesabschluss wird wieder als Kommen erfasst.
@@ -205,12 +209,15 @@ try {
             }
             if ($latest && $seconds >= 0 && $seconds < $guard) {
                 $response = ['ok' => true, 'title' => 'Bereits erfasst', 'line1' => (string) $employee['name'], 'line2' => $latest['event_type'] === 'COME' ? 'Kommen bleibt aktiv' : 'Gehen bleibt aktiv'];
-            } elseif ($latest && $latest['event_type'] === 'COME' && $latestDate < $today && !$staleOpenResolved) {
-                $response = ['ok' => false, 'title' => 'Buchung offen', 'line1' => (string) $employee['name'], 'line2' => 'Admin informieren'];
             } else {
-                $eventType = $staleOpenResolved ? 'COME' : ($latest && $latest['event_type'] === 'COME' ? 'LEAVE' : 'COME');
+                $hasStaleOpen = $latest && $latest['event_type'] === 'COME' && $latestDate < $today && !$staleOpenResolved;
+                $eventType = ($staleOpenResolved || $hasStaleOpen) ? 'COME' : ($latest && $latest['event_type'] === 'COME' ? 'LEAVE' : 'COME');
                 $localTime = (new DateTimeImmutable('now', new DateTimeZone('Europe/Berlin')))->format('H:i');
-                $response = ['ok' => true, 'title' => (string) $employee['name'], 'line1' => ($eventType === 'COME' ? 'Kommen ' : 'Gehen ') . $localTime, 'line2' => 'Erfolgreich gebucht'];
+                if ($hasStaleOpen) {
+                    $response = ['ok' => false, 'title' => 'Kommen gespeichert', 'line1' => (string) $employee['name'], 'line2' => 'Inkonsistenz erkannt'];
+                } else {
+                    $response = ['ok' => true, 'title' => (string) $employee['name'], 'line1' => ($eventType === 'COME' ? 'Kommen ' : 'Gehen ') . $localTime, 'line2' => 'Erfolgreich gebucht'];
+                }
                 $pendingTimeEvent = ['employee_id' => (int) $employee['id'], 'card_id' => (int) $card['id'], 'event_type' => $eventType];
             }
         }
