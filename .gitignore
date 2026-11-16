@@ -3,6 +3,8 @@
 Thumbs.db
 *.swp
 *.swo
+__pycache__/
+*.pyc
 
 # Lokale Konfiguration und Geheimnisse
 .env

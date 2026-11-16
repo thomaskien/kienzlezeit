@@ -4,7 +4,7 @@
 
 Lokale RFID-Zeiterfassung für kleine Teams mit M5Stack M5Dial, PHP, Apache und SQLite. Das System läuft ohne Cloud-Zwang im eigenen Netzwerk.
 
-**Aktueller Stand:** 18. Juli 2026<br>
+**Aktueller Stand:** 16. November 2026<br>
 **Autor:** Dr. Thomas Kienzle
 
 ## Versionsstand
@@ -15,6 +15,7 @@ Lokale RFID-Zeiterfassung für kleine Teams mit M5Stack M5Dial, PHP, Apache und 
 | `rfid-scan.php` | 1.3 | produktiver, idempotenter RFID-API-Endpunkt |
 | `auslagen/auslagen.php` | 1.1.3 | integrierte Auslagen- und Kilometerverwaltung mit eigener SQLite-Datenbank |
 | `installer.sh` | 1.6.8 | GitHub-Bootstrap, Installation und additive Aktualisierung unter Debian/Ubuntu mit Apache |
+| `kienzlezeit-backup-und-restore.sh` | 1.0 | eigenständiger Backup-Installer, SSH/SMB, optional verschlüsselte ZIP-Dateien, Cron und Wiederherstellung |
 | `kienzlezeit_v1.4.ino` | 1.4 | aktuelle M5Dial-Firmware mit wählbarem HTTP/HTTPS und optimierter Anzeige |
 
 ## Funktionsumfang
@@ -211,16 +212,55 @@ Nach erfolgreicher WLAN-Verbindung zeigt das M5Dial kurz seine IP-Adresse und we
 
 **Bei Nutzung als Zeiterfassung sind regelmäßige Backups dringend empfohlen.** Die Sicherung, die der Installer vor einer Aktualisierung erzeugt, ersetzt kein laufendes Backupkonzept.
 
-SQLite sollte konsistent über den eingebauten Backup-Befehl gesichert werden, beispielsweise:
+Das eigenständige Programm **`kienzlezeit-backup-und-restore.sh` v1.0** installiert fehlende
+Voraussetzungen selbst. Es sichert beide Datenbanken (Auslagen, sofern vorhanden), die
+Terminal-Schlüsseldatei und ein Manifest mit Versionen und SHA-256-Prüfsummen.
+Die Anwendungs- und Firmwareversionen bleiben davon unabhängig.
 
 ```bash
-sudo sqlite3 /var/lib/kienzlezeit/kienzlezeit.sqlite \
-  ".backup '/SICHERER-PFAD/kienzlezeit-YYYY-MM-DD.sqlite'"
-sudo sqlite3 /var/lib/kienzlezeit/auslagen.sqlite \
-  ".backup '/SICHERER-PFAD/auslagen-YYYY-MM-DD.sqlite'"
+curl -fsSL \
+  https://raw.githubusercontent.com/thomaskien/kienzlezeit/main/kienzlezeit-backup-und-restore.sh \
+  -o kienzlezeit-backup-und-restore.sh
+sudo bash kienzlezeit-backup-und-restore.sh
 ```
 
-Empfohlen sind automatisierte tägliche Sicherungen, eine definierte Aufbewahrungsfrist und mindestens eine Kopie auf einem anderen Datenträger oder System. Beide Datenbanken **und** `/var/lib/kienzlezeit/terminal-secret.key` müssen gemeinsam gesichert und vor unbefugtem Zugriff geschützt werden. Die Wiederherstellung sollte vor dem Produktivbetrieb einmal getestet werden.
+**Startbildschirm – Beispiel:**
+
+```text
+kienzlezeit – Backup und Wiederherstellung v1.0
+von Dr. Thomas Kienzle
+
+Voraussetzungen geprueft. Fehlende Pakete wurden installiert.
+
+  1  Speicherort einrichten oder aendern
+  2  Automatische Sicherung einrichten
+  3  Jetzt sichern
+  4  Sicherung wiederherstellen
+  5  Verbindung und Sicherungsstatus pruefen
+  6  Automatische Sicherung deaktivieren
+  0  Beenden
+
+Auswahl:
+```
+
+- **Ziel:** SSH/SFTP mit eigenem Schlüssel und geprüftem Serverfingerabdruck oder SMB-Freigabe.
+- **Passwortschutz:** optional AES-256-ZIP; das Passwort separat aufbewahren. Es wird für
+  unbeaufsichtigte Sicherungen root-geschützt außerhalb des Webverzeichnisses gespeichert.
+- **Aufbewahrung:** 30 Tage täglich; pro abgeschlossener Kalenderwoche bleibt eine
+  geprüfte Sicherung dauerhaft erhalten. Wochenbackups werden niemals automatisch gelöscht.
+- **Übertragung:** lokal erstellen und prüfen, zum Ziel übertragen und zurücklesen/vergleichen.
+  Bei Fehlern bleiben ausstehende Archive lokal erhalten; Cron versucht es stündlich erneut.
+- **Restore nach Neuinstallation:** zuerst `installer.sh`, danach Backup-Programm starten,
+  unter **1** den Speicherort konfigurieren, unter **4** wiederherstellen und erst danach
+  unter **2** automatische Backups aktivieren. Vor Aktivierung läuft keine Bereinigung.
+
+**Ein Restore ersetzt den gesamten Datenstand.** Spätere Buchungen werden nicht übernommen.
+Dabei wird Apache kurz gestoppt, auch andere dort gehostete Seiten sind kurz nicht erreichbar.
+Das Programm legt vorher eine geschützte lokale Rückfallsicherung an. Backups ersetzen keine
+vollständige Systemsicherung; Programmdateien und Apache-Konfiguration installiert `installer.sh`.
+
+[Ausführliche Anleitung, Voraussetzungen, Speicherpfade und Fehlerbehandlung](docs/BACKUP_RESTORE.md).
+Eine Wiederherstellung mit dem eigenen Zielsystem sollte vor dem Produktivbetrieb getestet werden.
 
 ## Vorbereitung für GitHub
 
