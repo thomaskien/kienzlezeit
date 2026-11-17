@@ -14,7 +14,7 @@ Lokale RFID-Zeiterfassung für kleine Teams mit M5Stack M5Dial, PHP, Apache und 
 | `kienzlezeit.php` | 1.6.7 | Mitarbeiter- und Adminoberfläche, Datenmodell und Auswertungen |
 | `rfid-scan.php` | 1.3 | produktiver, idempotenter RFID-API-Endpunkt |
 | `auslagen/auslagen.php` | 1.1.3 | integrierte Auslagen- und Kilometerverwaltung mit eigener SQLite-Datenbank |
-| `installer.sh` | 1.6.8 | GitHub-Bootstrap, Installation und additive Aktualisierung unter Debian/Ubuntu mit Apache |
+| `installer.sh` | 1.6.9 | GitHub-Bootstrap, Installation, additive Aktualisierung und selbstsigniertes Apache-HTTPS |
 | `kienzlezeit-backup-und-restore.sh` | 1.0.1 | eigenständiger Backup-Installer, SSH/SMB einschließlich Gastzugriff, optional verschlüsselte ZIP-Dateien, Cron und Wiederherstellung |
 | `kienzlezeit_v1.4.ino` | 1.4 | aktuelle M5Dial-Firmware mit wählbarem HTTP/HTTPS und optimierter Anzeige |
 
@@ -75,6 +75,7 @@ Der Installer prüft beziehungsweise installiert nach Bestätigung:
 
 - Apache 2 und `libapache2-mod-php`
 - PHP CLI mit PDO/SQLite, `mbstring`, XML, GD und OpenSSL
+- OpenSSL-Kommandozeilenprogramm für selbstsignierte HTTPS-Zertifikate
 - SQLite 3
 - `qrencode` für lokale EPC-/GiroCode-QR-Codes der Auslagenverwaltung
 
@@ -101,17 +102,71 @@ Der Installer:
 3. legt Daten und Sicherungen unter `/var/lib/kienzlezeit` ab,
 4. erzeugt SQLite-Datenbank und Secret-Schlüsseldatei,
 5. führt vorhandene Zeit- und Auslagen-Datenbanken additiv auf das aktuelle Schema über,
-6. gibt das erste Admin-Übergangspasswort und den ersten Terminal-Key aus.
+6. gibt das erste Admin-Übergangspasswort und den ersten Terminal-Key aus,
+7. bietet HTTPS mit selbstsigniertem Zertifikat an (Standard: **Ja**) und prüft die lokale TLS-Verbindung.
 
 Anschließend öffnen:
 
 ```text
-http://SERVER-IP/kienzlezeit.php
+https://SERVER-IP/kienzlezeit.php
 ```
 
 Beim ersten Adminlogin muss das Übergangspasswort geändert werden. Den ausgegebenen Terminal-Key sicher aufbewahren; er wird in der Firmware benötigt und kann später im Adminbereich angezeigt oder ersetzt werden.
 
-Der Installer 1.6.8 richtet noch kein Apache-Zertifikat und keinen HTTPS-VirtualHost ein. Soll Firmware 1.4 HTTPS verwenden, muss der Server bereits unter einer `https://`-Adresse erreichbar sein; selbstsignierte Zertifikate sind zulässig. HTTP kann alternativ weiterhin gezielt konfiguriert werden.
+Die genaue Adresse und den SHA-256-Zertifikatsfingerabdruck zeigt der Installer am Ende an.
+Bei abgelehnter HTTPS-Einrichtung bleibt die bisherige HTTP-Adresse verfügbar.
+
+### HTTPS mit selbstsigniertem Zertifikat
+
+Installer **1.6.9** fragt alle IP-Adressen beziehungsweise Hostnamen ab, mit denen die Box
+aufgerufen wird. Sie werden als **Subject Alternative Names (SAN)** in das Zertifikat eingetragen.
+Hostnamen müssen im lokalen Netz bereits auf den Server auflösen; der Installer ändert keine
+DNS-Einträge oder IP-Adressen. Keine vollständige URL, keinen Port und keinen Pfad eingeben. Beispiel:
+
+```text
+HTTPS jetzt einrichten bzw. vorhandene Einrichtung pruefen? [J/n]
+Adresse(n), ohne http(s):// und ohne Pfad: 192.168.1.20 kienzlebox kienzlebox.local
+```
+
+- Apache erhält einen eigenen HTTPS-VirtualHost auf **Port 443**, mit mindestens TLS 1.2
+  (TLS 1.3, sofern von Apache unterstützt; ältere Protokolle sind abgeschaltet).
+- **HTTP bleibt ohne Weiterleitung erreichbar**, damit vorhandene M5Dial-Einstellungen weiter funktionieren.
+  Für Browseranmeldung, Passwortänderung und Personaldaten ausdrücklich die HTTPS-Adresse verwenden.
+- Das selbstsignierte RSA-Zertifikat ist **365 Tage** gültig. Firefox vertraut ihm zunächst nicht:
+  Adresse und angezeigten **SHA-256-Fingerabdruck** vergleichen und anschließend über „Erweitert“
+  eine Ausnahme für diesen eigenen Server bestätigen. Die Warnung wird nicht global abgeschaltet.
+- Bei erneutem Installerlauf werden vorhandenes Zertifikat und Adressen standardmäßig beibehalten.
+  Für andere Adressen oder eine Erneuerung die Frage nach dem Beibehalten mit **Nein** beantworten.
+  Bei weniger als 30 Tagen Restlaufzeit wird gewarnt. Es gibt keine automatische Zertifikatserneuerung;
+  nach einer Erneuerung muss dem neuen Zertifikat im Browser erneut vertraut werden.
+- Zertifikate und private Schlüssel liegen außerhalb des Webverzeichnisses unter
+  `/etc/kienzlezeit/tls/`. Der private Schlüssel ist nur für root lesbar. Frühere Zertifikatsstände
+  bleiben erhalten; `/etc/kienzlezeit/tls/active` benennt den aktuellen Stand.
+- Die verwaltete Site heißt `/etc/apache2/sites-available/kienzlezeit-ssl.conf`.
+  Eine dort vorhandene fremde Konfiguration wird nicht überschrieben. Andere Sites bleiben erhalten.
+  Bei einem fehlgeschlagenen Apache-/TLS-Test nimmt der Installer seine Site-/SSL-Moduländerungen zurück.
+- Falls bereits andere HTTPS-Sites auf Port 443 existieren, muss die angegebene Adresse zur richtigen
+  Site führen. Der lokale Test erkennt ein falsches Standardzertifikat; bestehende Sites werden
+  dabei nicht deaktiviert. Eine Firewall muss Port 443 im gewünschten lokalen Netz zulassen;
+  der Installer ändert keine Firewallregeln.
+
+Bei einer Neuinstallation nach Serverausfall wird HTTPS erneut eingerichtet. Die Datensicherung
+enthält bewusst keine Apache-Zertifikate; Browser müssen dem neuen Zertifikat gegebenenfalls erneut
+vertrauen. Die unabhängig gesicherte Terminal-Schlüsseldatei ist **kein** HTTPS-Zertifikat.
+
+Firmware 1.4 kann den ausgegebenen HTTPS-RFID-Endpunkt verwenden und akzeptiert auch selbstsignierte
+Zertifikate. Bestehende HTTP-URLs und Firmware-Zugangsdaten werden vom Installer nicht verändert.
+
+Tests für die HTTPS-Erweiterung:
+
+```bash
+bash -n installer.sh
+python3 -m unittest discover -s tests -p 'test_installer_https.py' -v
+```
+
+Die Tests erzeugen ausschließlich temporäre Zertifikate und Konfigurationen. Debian-Dienstverwaltung
+wird simuliert; wenn lokal verfügbar, prüft ein separater Apache auf unprivilegierten Testports
+zusätzlich echte HTTPS-Verbindungen mit Zertifikatsprüfung und den weiter verfügbaren HTTP-Zugang.
 
 ### Auslagenverwaltung aktivieren
 
@@ -272,6 +327,6 @@ Vor der Veröffentlichung müssen insbesondere folgende Punkte geprüft werden:
 - SQLite-Dateien, WAL-/SHM-Dateien, Sicherungen und `terminal-secret.key` ausschließen,
 - Test- und Produktivkonfiguration klar trennen,
 - Lizenz und Beitragsregeln festlegen,
-- Apache-HTTPS-Konfiguration bereitstellen und den HTTPS-Modus vor der Veröffentlichung Ende-zu-Ende testen; HTTP bleibt als optionale Betriebsart erhalten.
+- die vom Installer eingerichtete HTTPS-Adresse auf dem Zielserver und den HTTPS-Modus des Terminals Ende-zu-Ende testen; HTTP bleibt als optionale Betriebsart erhalten.
 
 Die produktive Datenbank und alle Schlüsseldateien gehören niemals in das Repository.

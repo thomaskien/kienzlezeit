@@ -2,12 +2,18 @@
 #
 # kienzlezeit – Installer fuer Apache/SQLite
 #
-# Installer-Version: 1.6.8
+# Installer-Version: 1.6.9
 # Anwendungs-Version: 1.6.7
 # Author: Dr. Thomas Kienzle
-# Stand: 2026-07-18
+# Stand: 2026-11-17
 #
 # Changelog (komplett):
+# - Installer 1.6.9 (2026-11-17):
+#   - Richtet optional (Standard: Ja) Apache-HTTPS mit selbstsigniertem Zertifikat ein.
+#   - Fragt IP-Adressen/Hostnamen fuer SAN ab; erhaelt Zertifikate bei Wiederholung.
+#   - Prueft TLS und Apache; nimmt eigene HTTPS-Aenderungen bei Fehlern zurueck.
+#   - HTTP bleibt fuer bestehende Terminals ohne Umleitung erreichbar.
+#
 # - Installer 1.6.8 (2026-07-18):
 #   - Installiert kienzlezeit 1.6.7 und den RFID-Endpunkt 1.3.
 #   - Neue Buchungen werden trotz erkannter fehlender Ausbuchung gespeichert und gewarnt.
@@ -86,7 +92,7 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.6.8"
+INSTALLER_VERSION="1.6.9"
 APP_VERSION="1.6.7"
 APP_AUTHOR="Dr. Thomas Kienzle"
 GITHUB_REPOSITORY="thomaskien/kienzlezeit"
@@ -102,6 +108,15 @@ WEB_USER="www-data"
 WEB_GROUP="www-data"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR=""
+TLS_DIR="/etc/kienzlezeit/tls"
+TLS_SITE="/etc/apache2/sites-available/kienzlezeit-ssl.conf"
+TLS_ENABLED="/etc/apache2/sites-enabled/kienzlezeit-ssl.conf"
+HTTPS_URL=""
+HTTPS_PENDING=0
+TLS_OLD_SITE=0
+TLS_OLD_ENABLED=0
+TLS_OLD_MODULE=0
+TLS_OLD_ACTIVE=0
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'FEHLER: %s\n' "$*" >&2; exit 1; }
@@ -124,6 +139,9 @@ json_reset() {
   printf '{"admin_username":"%s","admin_password":"%s"}' "${username}" "${password}" | php "${WEBROOT}/kienzlezeit.php" --reset-admin
 }
 cleanup() {
+  if [[ "${HTTPS_PENDING}" == 1 ]]; then
+    rollback_https
+  fi
   if [[ -n "${SOURCE_DIR}" && -d "${SOURCE_DIR}" ]]; then
     rm -rf -- "${SOURCE_DIR}"
   fi
@@ -144,6 +162,221 @@ download_source() {
   mv -- "${part_file}" "${target}"
 }
 
+# BEGIN HTTPS HELPERS
+confirm_default_yes() {
+  local answer
+  read -r -p "$1 [J/n] " answer || return 1
+  case "${answer}" in ''|j|J|ja|Ja|JA) return 0 ;; *) return 1 ;; esac
+}
+
+# Canonical lines: one DNS name or IP address per line. Never evaluate this text
+# as shell code. PHP is already an installer dependency, including filter/openssl.
+tls_addresses() {
+  php -r '
+    $input=trim(stream_get_contents(STDIN));
+    $out=[];
+    foreach(preg_split("/[\\s,]+/",$input,-1,PREG_SPLIT_NO_EMPTY) as $name) {
+      if(str_starts_with($name,"[") && str_ends_with($name,"]")) {
+        $name=substr($name,1,-1);
+        if(filter_var($name,FILTER_VALIDATE_IP,FILTER_FLAG_IPV6)===false) {
+          fwrite(STDERR,"Eckige Klammern sind nur fuer IPv6-Adressen erlaubt.\n");exit(1);
+        }
+      }
+      if(filter_var($name,FILTER_VALIDATE_IP)!==false) {
+        $name=inet_ntop(inet_pton($name));
+      } else {
+        $name=strtolower(rtrim($name,"."));
+        if(strlen($name)>253 || preg_match("/^[0-9.]+$/D",$name)
+          || !preg_match("/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/D",$name)) {
+          fwrite(STDERR,"Ungueltige Adresse. Nur IP/Hostname ohne http(s)://, Port, Pfad oder Wildcard eingeben.\n"); exit(1);
+        }
+      }
+      if(!in_array($name,$out,true)) $out[]=$name;
+    }
+    if(count($out)<1 || count($out)>32) {fwrite(STDERR,"Bitte 1 bis 32 Adressen angeben.\n");exit(1);}
+    echo implode("\n",$out)."\n";
+  '
+}
+
+tls_url_host() {
+  case "$1" in *:*) printf '[%s]' "$1" ;; *) printf '%s' "$1" ;; esac
+}
+
+tls_create_certificate() {
+  local directory="$1" addresses="$2" address type index=0
+  [[ -d "${directory}" && ! -L "${directory}" ]] || return 1
+  [[ ! -e "${directory}/server.key" && ! -e "${directory}/server.crt" ]] || return 1
+  printf '%s\n' "${addresses}" > "${directory}/addresses"
+  {
+    printf '%s\n' '[req]' 'prompt = no' 'distinguished_name = dn' 'x509_extensions = server' \
+      '[dn]' 'CN = kienzlezeit' '[server]' 'basicConstraints = critical,CA:FALSE' \
+      'keyUsage = critical,digitalSignature,keyEncipherment' 'extendedKeyUsage = serverAuth' \
+      'subjectAltName = @names' '[names]'
+    while IFS= read -r address; do
+      [[ -n "${address}" ]] || continue
+      index=$((index + 1))
+      if [[ "${address}" == *:* || "${address}" =~ ^[0-9.]+$ ]]; then type=IP; else type=DNS; fi
+      printf '%s.%s = %s\n' "${type}" "${index}" "${address}"
+    done <<< "${addresses}"
+  } > "${directory}/openssl.cnf"
+  (umask 077; openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 365 \
+    -config "${directory}/openssl.cnf" -keyout "${directory}/server.key" \
+    -out "${directory}/server.crt" >/dev/null 2>&1) || return 1
+  chmod 0600 "${directory}/server.key"
+  chmod 0644 "${directory}/server.crt"
+}
+
+tls_check_pair() {
+  local directory="$1" cert_public key_public address
+  [[ -f "${directory}/server.crt" && ! -L "${directory}/server.crt" \
+    && -f "${directory}/server.key" && ! -L "${directory}/server.key" \
+    && -f "${directory}/addresses" && ! -L "${directory}/addresses" ]] || return 1
+  cert_public="$(openssl x509 -in "${directory}/server.crt" -pubkey -noout)" || return 1
+  key_public="$(openssl pkey -in "${directory}/server.key" -passin pass: -pubout 2>/dev/null)" || return 1
+  [[ "${cert_public}" == "${key_public}" ]] || return 1
+  # Refuse unsafe metadata before it can reach Apache's configuration.
+  tls_addresses < "${directory}/addresses" > "${SOURCE_DIR}/tls-validated-addresses" || return 1
+  cmp -s "${directory}/addresses" "${SOURCE_DIR}/tls-validated-addresses" || return 1
+  while IFS= read -r address; do
+    if [[ "${address}" == *:* || "${address}" =~ ^[0-9.]+$ ]]; then
+      openssl x509 -in "${directory}/server.crt" -noout -checkip "${address}" >/dev/null || return 1
+    else
+      openssl x509 -in "${directory}/server.crt" -noout -checkhost "${address}" >/dev/null || return 1
+    fi
+  done < "${directory}/addresses"
+}
+
+tls_write_vhost() {
+  local directory="$1" primary='' address
+  # Apache does not accept IPv6 literals in ServerName. Keep IPv6 in SANs
+  # and aliases; select a DNS/IPv4 name, or a local-only canonical fallback.
+  while IFS= read -r address; do
+    if [[ "${address}" != *:* ]]; then primary="${address}"; break; fi
+  done < "${directory}/addresses"
+  primary="${primary:-kienzlezeit.invalid}"
+  printf '%s\n' '# Managed by kienzlezeit installer (HTTPS)' '<VirtualHost *:443>'
+  printf '    ServerName %s\n' "${primary}"
+  while IFS= read -r address; do
+    if [[ "${address}" == "${primary}" ]]; then continue; fi
+    printf '    ServerAlias %s\n' "$(tls_url_host "${address}")"
+  done < "${directory}/addresses"
+  printf '    DocumentRoot "%s"\n' "${WEBROOT}"
+  printf '%s\n' '    SSLEngine on' '    SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1' \
+    '    SSLCipherSuite HIGH:!aNULL:!MD5:!3DES' '    SSLSessionTickets off'
+  printf '    SSLCertificateFile "%s/server.crt"\n' "${directory}"
+  printf '    SSLCertificateKeyFile "%s/server.key"\n' "${directory}"
+  printf '    <Directory "%s">\n' "${WEBROOT}"
+  printf '%s\n' '        Options -Indexes' '        Require all granted' '    </Directory>' \
+    '    ErrorLog ${APACHE_LOG_DIR}/kienzlezeit-ssl-error.log' \
+    '    CustomLog ${APACHE_LOG_DIR}/kienzlezeit-ssl-access.log combined' '</VirtualHost>'
+}
+
+rollback_https() {
+  # Only this installer's site/module changes are reverted. Other sites/certs
+  # and immutable certificate generations are never removed.
+  HTTPS_PENDING=0
+  say 'HTTPS-Einrichtung nicht abgeschlossen; vorherige Apache-Konfiguration wird wiederhergestellt.'
+  if [[ "${TLS_OLD_ENABLED}" == 0 ]]; then a2dissite kienzlezeit-ssl.conf >/dev/null 2>&1 || true; fi
+  if [[ "${TLS_OLD_SITE}" == 1 ]]; then
+    cp -p "${SOURCE_DIR}/tls-site.previous" "${TLS_SITE}.restore" && mv -f "${TLS_SITE}.restore" "${TLS_SITE}" || return 1
+  else
+    rm -f -- "${TLS_SITE}"
+  fi
+  if [[ "${TLS_OLD_ACTIVE}" == 1 ]]; then
+    cp -p "${SOURCE_DIR}/tls-active.previous" "${TLS_DIR}/active.restore" && mv -f "${TLS_DIR}/active.restore" "${TLS_DIR}/active" || return 1
+  else
+    rm -f -- "${TLS_DIR}/active"
+  fi
+  if [[ "${TLS_OLD_MODULE}" == 0 ]]; then a2dismod ssl >/dev/null 2>&1 || true; fi
+  if apache2ctl configtest && systemctl is-active --quiet apache2; then
+    systemctl reload apache2 || say 'WARNUNG: Apache konnte nach Ruecknahme nicht neu geladen werden.'
+  fi
+}
+
+configure_https() {
+  local generation='' directory='' addresses='' entered='' primary='' answer='' existing=0 tool
+  say ''
+  say 'HTTPS fuer die Weboberflaeche (selbstsigniertes Zertifikat)'
+  say 'HTTP bleibt ohne Umleitung fuer bestehende Terminals erreichbar.'
+  if ! confirm_default_yes 'HTTPS jetzt einrichten bzw. vorhandene Einrichtung pruefen?'; then
+    say 'HTTPS-Konfiguration unveraendert. Keine neue HTTPS-Einrichtung vorgenommen.'
+    return
+  fi
+  for tool in openssl a2enmod a2dismod a2query a2ensite a2dissite apache2ctl systemctl; do
+    command -v "${tool}" >/dev/null || die "Fuer HTTPS fehlt ${tool}. Debian/Ubuntu mit Apache erforderlich."
+  done
+  [[ ! -L "${TLS_DIR}" ]] || die 'TLS-Verzeichnis darf kein Symlink sein.'
+  if [[ -e "${TLS_SITE}" || -L "${TLS_SITE}" ]]; then
+    [[ -f "${TLS_SITE}" && ! -L "${TLS_SITE}" ]] || die 'Vorhandene HTTPS-Site ist keine regulaere Datei; unveraendert abgebrochen.'
+    IFS= read -r answer < "${TLS_SITE}"
+    [[ "${answer}" == '# Managed by kienzlezeit installer (HTTPS)' ]] || die 'Vorhandene kienzlezeit-ssl.conf wird nicht vom Installer verwaltet; bitte bestehende Konfiguration pruefen.'
+    TLS_OLD_SITE=1
+  fi
+  if [[ -e "${TLS_ENABLED}" || -L "${TLS_ENABLED}" ]]; then
+    [[ -L "${TLS_ENABLED}" && "${TLS_ENABLED}" -ef "${TLS_SITE}" ]] || die 'Aktivierte HTTPS-Site verweist auf eine fremde Konfiguration; unveraendert abgebrochen.'
+    TLS_OLD_ENABLED=1
+  fi
+  a2query -m ssl >/dev/null 2>&1 && TLS_OLD_MODULE=1
+  if [[ -e "${TLS_DIR}/active" || -L "${TLS_DIR}/active" ]]; then
+    [[ -f "${TLS_DIR}/active" && ! -L "${TLS_DIR}/active" ]] || die 'Ungueltige TLS-Metadaten; nichts ueberschrieben.'
+    IFS= read -r generation < "${TLS_DIR}/active"
+    [[ "${generation}" =~ ^cert-[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$ ]] || die 'Ungueltige Zertifikatskennung.'
+    directory="${TLS_DIR}/${generation}"
+    [[ ! -L "${directory}" ]] && tls_check_pair "${directory}" || die 'Vorhandenes Zertifikat/Schluessel oder Adressliste ist ungueltig. Keine automatische Ersetzung.'
+    cp -p "${TLS_DIR}/active" "${SOURCE_DIR}/tls-active.previous"
+    TLS_OLD_ACTIVE=1
+    say 'Vorhandenes Zertifikat fuer:'
+    sed 's/^/  /' "${directory}/addresses"
+    openssl x509 -in "${directory}/server.crt" -noout -dates -fingerprint -sha256
+    if openssl x509 -in "${directory}/server.crt" -checkend 0 -noout >/dev/null; then
+      openssl x509 -in "${directory}/server.crt" -checkend 2592000 -noout >/dev/null || say 'WARNUNG: Zertifikat laeuft innerhalb von 30 Tagen ab; Erneuerung empfohlen.'
+      if confirm_default_yes 'Vorhandenes Zertifikat und Adressen beibehalten?'; then existing=1; fi
+    else
+      confirm_default_yes 'Zertifikat ist abgelaufen. Neues Zertifikat erstellen?' || die 'Abgebrochen; abgelaufenes Zertifikat wurde nicht ersetzt.'
+    fi
+  fi
+  if [[ "${existing}" == 0 ]]; then
+    say 'Alle verwendeten IP-Adressen/Hostnamen angeben, getrennt durch Leerzeichen oder Komma.'
+    say 'Die erste Adresse wird als URL ausgegeben. Beispiel: 192.168.1.20 kienzlebox kienzlebox.local'
+    read -r -p 'Adresse(n), ohne http(s):// und ohne Pfad: ' entered || die 'Keine Adresse eingegeben.'
+    addresses="$(printf '%s' "${entered}" | tls_addresses)" || die 'Adressliste ungueltig; HTTPS nicht veraendert.'
+    install -d -o root -g root -m 0700 "${TLS_DIR}"
+    generation="cert-$(date '+%Y%m%d-%H%M%S')-$(random_hex 4)"
+    directory="${TLS_DIR}/${generation}"
+    [[ ! -e "${directory}" ]] || die 'Zertifikatsverzeichnis existiert bereits.'
+    install -d -o root -g root -m 0700 "${directory}"
+    tls_create_certificate "${directory}" "${addresses}" && tls_check_pair "${directory}" || die 'Zertifikat konnte nicht erzeugt/geprueft werden; Apache unveraendert.'
+    say 'Neues selbstsigniertes Zertifikat erstellt (365 Tage gueltig).'
+  fi
+  if [[ "${TLS_OLD_SITE}" == 1 ]]; then cp -p "${TLS_SITE}" "${SOURCE_DIR}/tls-site.previous"; fi
+  tls_write_vhost "${directory}" > "${SOURCE_DIR}/kienzlezeit-ssl.conf"
+  HTTPS_PENDING=1
+  a2enmod ssl >/dev/null || die 'Apache-SSL-Modul konnte nicht aktiviert werden.'
+  install -o root -g root -m 0644 "${SOURCE_DIR}/kienzlezeit-ssl.conf" "${TLS_SITE}.new"
+  mv -f "${TLS_SITE}.new" "${TLS_SITE}"
+  a2ensite kienzlezeit-ssl.conf >/dev/null || die 'HTTPS-Site konnte nicht aktiviert werden.'
+  apache2ctl configtest || die 'HTTPS-Konfiguration fehlerhaft; vorherige Konfiguration wird wiederhergestellt.'
+  systemctl reload apache2 || die 'Apache konnte HTTPS nicht laden; vorherige Konfiguration wird wiederhergestellt.'
+  IFS= read -r primary < "${directory}/addresses"
+  HTTPS_URL="https://$(tls_url_host "${primary}")"
+  # Use the generated certificate as trust anchor, not --insecure. This detects
+  # SAN mismatch, wrong/default vhost, missing listener and a failed TLS handshake.
+  curl --fail --silent --show-error --noproxy '*' --cacert "${directory}/server.crt" \
+    --connect-to "$(tls_url_host "${primary}"):443:127.0.0.1:443" --connect-timeout 5 --max-time 20 \
+    --retry 2 --retry-connrefused --retry-delay 1 --output /dev/null \
+    "${HTTPS_URL}/kienzlezeit.php" || die 'Lokaler HTTPS-Test fehlgeschlagen. Port 443, vorhandene HTTPS-VHosts und Adresszuordnung pruefen.'
+  printf '%s\n' "${generation}" > "${TLS_DIR}/active.new"
+  chmod 0600 "${TLS_DIR}/active.new"
+  mv -f "${TLS_DIR}/active.new" "${TLS_DIR}/active"
+  HTTPS_PENDING=0
+  say "HTTPS erfolgreich geprueft: ${HTTPS_URL}/kienzlezeit.php"
+  openssl x509 -in "${directory}/server.crt" -noout -dates -fingerprint -sha256
+  say 'Firefox meldet wegen der Selbstsignierung zunaechst einen unbekannten Aussteller.'
+  say 'Adresse und SHA-256-Fingerabdruck pruefen, dann die Ausnahme fuer diesen Server bestaetigen.'
+  say 'Bei spaeterer Erneuerung muss dem neuen Zertifikat erneut vertraut werden.'
+}
+# END HTTPS HELPERS
+
 [[ "${EUID}" -eq 0 ]] || die "Bitte mit sudo oder als root ausfuehren."
 command -v apt-get >/dev/null 2>&1 || die "Dieser Installer erwartet Debian/Ubuntu mit apt."
 
@@ -156,6 +389,7 @@ required_packages=(
   apache2
   ca-certificates
   curl
+  openssl
   libapache2-mod-php
   php-cli
   php-sqlite3
@@ -330,11 +564,14 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl reload apache2
 fi
 
+configure_https
+
 say ""
 say "Installation abgeschlossen."
-say "Weboberflaeche: http://SERVER-IP/kienzlezeit.php"
+say "Weboberflaeche: ${HTTPS_URL:-http://SERVER-IP}/kienzlezeit.php"
+if [[ -n "${HTTPS_URL}" ]]; then say "RFID per HTTPS: ${HTTPS_URL}/rfid-scan.php"; fi
 say "RFID-Endpunkt:  http://SERVER-IP/rfid-scan.php"
-say "Auslagen:       http://SERVER-IP/auslagen.php (in den Optionen aktivierbar)"
+say "Auslagen:       ${HTTPS_URL:-http://SERVER-IP}/auslagen.php (in den Optionen aktivierbar)"
 say "Datenbank:      ${DB_FILE}"
 say "Auslagen-DB:    ${EXPENSE_DB_FILE}"
 say "Secret-Key:     ${SECRET_KEY_FILE}"
@@ -342,4 +579,4 @@ say ""
 say "WICHTIG: Regelmaessige Backups der beiden SQLite-Datenbanken und der"
 say "Schluesseldatei auf einem zweiten Datentraeger sind dringend empfohlen."
 say ""
-say "Hinweis: Fuer den Adminbetrieb sollte Apache spaeter per HTTPS erreichbar sein."
+say "Hinweis: Fuer Admin-Passwoerter und Personaldaten die HTTPS-Adresse verwenden."
