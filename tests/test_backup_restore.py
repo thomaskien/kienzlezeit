@@ -1,4 +1,4 @@
-"""Backup 1.0 regression tests; only temporary data, never production services.
+"""Backup 1.0.1 regression tests; only temporary data, never production services.
 
 Run: python3 -m unittest discover -s tests -p 'test_backup_restore.py' -v
 Requires PHP CLI with ZipArchive, PDO SQLite and OpenSSL.
@@ -379,6 +379,123 @@ class BackupTests(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout='', stderr='')
         with patch.object(self.m, 'run', side_effect=fake_run):
             self.m.Remote(config).command('ls')
+
+    def test_smb_guest_uses_no_credentials_file_or_old_password(self):
+        config = {**self.config, 'transport': 'smb', 'smb_auth': 'guest', 'share': 'Backups',
+                  'username': 'old-user', 'password': 'old-secret', 'domain': 'OLD-DOMAIN'}
+        result = types.SimpleNamespace(returncode=0, stdout='guest listing', stderr='')
+        with patch.object(self.m, 'run', return_value=result) as run, patch.object(self.m, 'atomic_write') as write:
+            self.assertEqual(self.m.Remote(config).command('ls'), 'guest listing')
+        args = run.call_args.args[0]
+        self.assertEqual(args[args.index('-U') + 1], 'guest%')
+        self.assertIn('-N', args)
+        self.assertIn('--use-kerberos=off', args)
+        self.assertIn('--option=client min protocol=SMB2', args)
+        self.assertNotIn('-A', args)
+        for value in ('old-user', 'old-secret', 'OLD-DOMAIN'):
+            self.assertNotIn(value, str(args))
+        write.assert_not_called()
+
+    def test_smb_guest_failure_does_not_fallback_or_weaken_protocol(self):
+        config = {**self.config, 'transport': 'smb', 'smb_auth': 'guest', 'share': 'Backups'}
+        for code in (0, 1):
+            result = types.SimpleNamespace(returncode=code, stdout='NT_STATUS_ACCESS_DENIED', stderr='')
+            with patch.object(self.m, 'run', return_value=result) as run:
+                with self.assertRaises(self.m.BackupError):
+                    self.m.Remote(config).command('ls')
+            run.assert_called_once()
+            self.assertNotIn('NT1', str(run.call_args))
+
+    def test_smb_legacy_named_guest_remains_password_login(self):
+        config = {**self.config, 'transport': 'smb', 'share': 'Backups',
+                  'username': 'guest', 'password': 'existing-secret', 'domain': ''}
+        def fake_run(args, **kwargs):
+            self.assertIn('-A', args)
+            self.assertNotIn('-N', args)
+            self.assertNotIn('-U', args)
+            auth = Path(args[args.index('-A') + 1])
+            self.assertIn('password = existing-secret', auth.read_text())
+            return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+        with patch.object(self.m, 'run', side_effect=fake_run):
+            self.m.Remote(config).command('ls')
+
+    def test_smb_invalid_auth_mode_is_rejected(self):
+        with self.assertRaises(self.m.BackupError):
+            self.m.Remote({**self.config, 'transport': 'smb', 'smb_auth': 'automatic-fallback'})
+
+    def test_guest_dialog_skips_credentials_and_preserves_zip_password(self):
+        config = {**self.config, 'transport': 'smb', 'username': 'old-user',
+                  'password': 'old-smb-password', 'domain': 'old-domain',
+                  'archive_password': 'keep-zip-password'}
+        answers = ['2', 'nas.local', '2', 'Backups', 'kienzlezeit']
+        with patch.object(self.m, 'ask', side_effect=answers) as ask, patch.object(self.m, 'secret') as secret, patch.object(self.m, 'apt_install') as apt, patch.object(self.m, 'check_connection') as connection, contextlib.redirect_stdout(io.StringIO()):
+            self.m.configure_target(config)
+        secret.assert_not_called()
+        apt.assert_called_once_with(['smbclient'])
+        self.assertNotIn('Benutzername', [call.args[0] for call in ask.call_args_list])
+        self.assertEqual(connection.call_args.args[0].c['smb_auth'], 'guest')
+        saved = self.m.read_json(self.m.CONFIG)
+        self.assertEqual(saved['smb_auth'], 'guest')
+        self.assertEqual(saved['username'], 'guest')
+        self.assertEqual(saved['password'], '')
+        self.assertEqual(saved['domain'], '')
+        self.assertEqual(saved['archive_password'], 'keep-zip-password')
+        self.assertFalse(saved['enabled'])
+        self.assertFalse(self.m.CRON.exists())
+
+    def test_password_dialog_can_switch_back_from_guest(self):
+        config = {**self.config, 'transport': 'smb', 'smb_auth': 'guest', 'username': 'guest',
+                  'password': '', 'domain': '', 'archive_password': 'keep-zip-password'}
+        answers = ['2', 'nas.local', '1', 'backup-user', 'Backups', 'kienzlezeit', 'WORKGROUP']
+        with patch.object(self.m, 'ask', side_effect=answers), patch.object(self.m, 'secret', return_value='new-smb-secret') as secret, patch.object(self.m, 'apt_install'), patch.object(self.m, 'check_connection'), contextlib.redirect_stdout(io.StringIO()):
+            self.m.configure_target(config)
+        secret.assert_called_once_with('SMB-Passwort')
+        self.assertEqual(config['smb_auth'], 'password')
+        self.assertEqual(config['username'], 'backup-user')
+        self.assertEqual(config['password'], 'new-smb-secret')
+        self.assertEqual(config['domain'], 'WORKGROUP')
+        self.assertEqual(config['archive_password'], 'keep-zip-password')
+
+    def test_failed_guest_configuration_keeps_previous_config_and_cron(self):
+        config = {**self.config, 'enabled': True}
+        before = dict(config)
+        self.m.save_config(config)
+        self.m.CRON.write_text('existing cron\n')
+        answers = ['2', 'nas.local', '2', 'Backups', 'kienzlezeit']
+        with patch.object(self.m, 'ask', side_effect=answers), patch.object(self.m, 'confirm', return_value=True), patch.object(self.m, 'apt_install'), patch.object(self.m, 'check_connection', side_effect=self.m.BackupError('guest denied')), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(self.m.BackupError, 'guest denied'):
+                self.m.configure_target(config)
+        self.assertEqual(config, before)
+        self.assertEqual(self.m.read_json(self.m.CONFIG), before)
+        self.assertEqual(self.m.CRON.read_text(), 'existing cron\n')
+
+    def test_password_login_still_rejects_empty_username(self):
+        answers = ['2', 'nas.local', '1', '']
+        with patch.object(self.m, 'ask', side_effect=answers), patch.object(self.m, 'check_connection') as connection, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(self.m.BackupError, 'Benutzername'):
+                self.m.configure_target(dict(self.config))
+        connection.assert_not_called()
+
+    def test_ssh_does_not_accept_guest_mode_or_empty_username(self):
+        config = {**self.config, 'smb_auth': 'guest'}
+        with patch.object(self.m, 'ask', side_effect=['1', 'ssh.local', '']) as ask, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(self.m.BackupError, 'Benutzername'):
+                self.m.configure_target(config)
+        self.assertEqual(ask.call_args.args[0], 'Benutzername')
+
+    def test_guest_outbox_is_separate_and_old_password_target_id_is_stable(self):
+        import hashlib
+        config = {**self.config, 'transport': 'smb', 'username': 'guest', 'share': 'Backups'}
+        fields = {k: config.get(k) for k in ('transport', 'host', 'port', 'share', 'directory', 'username')}
+        old_id = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
+        self.assertEqual(self.m.target_id(config), old_id)
+        self.assertEqual(self.m.target_id({**config, 'smb_auth': 'password'}), old_id)
+        self.assertNotEqual(self.m.target_id({**config, 'smb_auth': 'guest'}), old_id)
+
+    def test_archive_password_still_cannot_be_empty(self):
+        with patch.object(self.m.getpass, 'getpass', return_value=''):
+            with self.assertRaisesRegex(self.m.BackupError, 'Passwort darf nicht leer'):
+                self.m.secret('Backup-Passwort')
 
     def test_real_sftp_file_protocol(self):
         server = next((p for p in ('/usr/libexec/sftp-server', '/usr/lib/openssh/sftp-server', '/usr/lib/ssh/sftp-server') if Path(p).exists()), None)

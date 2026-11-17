@@ -1,6 +1,6 @@
 # Backup und Wiederherstellung
 
-**Programm:** `kienzlezeit-backup-und-restore.sh` · **Version:** 1.0 · **Stand:** 16.11.2026<br>
+**Programm:** `kienzlezeit-backup-und-restore.sh` · **Version:** 1.0.1 · **Stand:** 17.11.2026<br>
 **Autor:** Dr. Thomas Kienzle
 
 ## Voraussetzungen und Installation
@@ -56,8 +56,29 @@ root-geschützt gespeichert und niemals ins Datenarchiv aufgenommen.
 
 ### SMB / Netzwerkfreigabe
 
-Server, Freigabe, optionales vorhandenes Unterverzeichnis, Benutzer, Domäne/Arbeitsgruppe
-und Passwort eingeben. Es wird `smbclient` genutzt, kein dauerhaftes Mounten und kein Eintrag
+Server und Anmeldeart auswählen:
+
+```text
+SMB-Anmeldung:
+  1  Benutzername und Passwort
+  2  Gastzugriff ohne Passwort
+
+Auswahl [1]:
+```
+
+Bei **1** Benutzer, Freigabe, optionales vorhandenes Unterverzeichnis, Domäne/Arbeitsgruppe
+und Passwort eingeben. Bei **2** werden Benutzer, Domäne und Passwort nicht abgefragt:
+Das Programm meldet sich ausdrücklich als `guest` mit leerem Passwort an. Das NAS muss
+diesen Gastzugriff mit Lese-, Schreib-, Umbenennungs- und Löschrechten erlauben; das Programm
+ändert keine Freigaberechte am NAS und wechselt bei einem Anmeldefehler nicht automatisch
+in den Gastmodus. Bestehende Konfigurationen aus Version 1.0 bleiben Benutzeranmeldungen.
+
+**Gastzugriff und ZIP-Passwortschutz sind unabhängig.** Die Archivverschlüsselung schützt
+den Inhalt, aber nicht vor dem Löschen oder Ersetzen der Dateien durch andere Gäste.
+Beim Wechsel der Anmeldeart bleiben ausstehende lokale Archive dem bisherigen Zielmodus
+zugeordnet; sie werden nicht ungefragt über den Gastzugang übertragen.
+
+Es wird `smbclient` genutzt, kein dauerhaftes Mounten und kein Eintrag
 in `/etc/fstab`. SMB1 ist ausgeschlossen (mindestens SMB2). SMB-Transportverschlüsselung
 hängt von der Serverkonfiguration ab; für vertrauliche Archive den ZIP-Passwortschutz einschalten.
 
@@ -160,7 +181,7 @@ den Datenbanken und Terminal-Secrets stammen danach wieder aus der Sicherung. Ba
 dessen Zugangsdaten bleiben erhalten. Browser müssen sich neu anmelden.
 
 Vor dem Ersetzen werden Archivstruktur, Passwort, Prüfsummen, SQLite-Integrität, Schlüsselzuordnung
-und Versionsverträglichkeit geprüft. Version 1.0 akzeptiert keine neuere Anwendungsversion und
+und Versionsverträglichkeit geprüft. Das Programm akzeptiert keine neuere Anwendungsversion und
 keine abweichenden Datenbankschemata; in diesem Fall zuerst den passenden Anwendungsinstaller nutzen.
 Es werden keine ausführbaren Dateien aus dem Archiv übernommen. Größenlimit: 8 GiB je Archiv
 und insgesamt für den entpackten Inhalt.
@@ -226,6 +247,8 @@ zusätzlich das echte OpenSSH-SFTP-Dateiprotokoll über einen lokalen `sftp-serv
 Test gegen das eigene SSH-/SMB-Ziel und ein Restore auf einem Testserver bleiben vor dem
 Produktivbetrieb erforderlich.
 
+- **1.0.1 – 17.11.2026:** Explizite Auswahl für SMB-Gastzugriff ohne Benutzer-/Passwortabfrage.
+  Bestehende Benutzeranmeldungen und ZIP-Passwortschutz bleiben erhalten; Regressionstests ergänzt.
 - **1.0 – 16.11.2026:** Erste eigenständige Version mit automatischer Installation der Abhängigkeiten,
   SSH/SFTP und SMB, optional AES-256-ZIP, Cron, 30-Tage-/dauerhafter Wochenaufbewahrung sowie
   geprüftem Restore mit lokaler Rückfallsicherung und Wiederaufnahme nach Abbruch.

@@ -4,7 +4,7 @@
 
 Lokale RFID-Zeiterfassung für kleine Teams mit M5Stack M5Dial, PHP, Apache und SQLite. Das System läuft ohne Cloud-Zwang im eigenen Netzwerk.
 
-**Aktueller Stand:** 16. November 2026<br>
+**Aktueller Stand:** 17. November 2026<br>
 **Autor:** Dr. Thomas Kienzle
 
 ## Versionsstand
@@ -15,7 +15,7 @@ Lokale RFID-Zeiterfassung für kleine Teams mit M5Stack M5Dial, PHP, Apache und 
 | `rfid-scan.php` | 1.3 | produktiver, idempotenter RFID-API-Endpunkt |
 | `auslagen/auslagen.php` | 1.1.3 | integrierte Auslagen- und Kilometerverwaltung mit eigener SQLite-Datenbank |
 | `installer.sh` | 1.6.8 | GitHub-Bootstrap, Installation und additive Aktualisierung unter Debian/Ubuntu mit Apache |
-| `kienzlezeit-backup-und-restore.sh` | 1.0 | eigenständiger Backup-Installer, SSH/SMB, optional verschlüsselte ZIP-Dateien, Cron und Wiederherstellung |
+| `kienzlezeit-backup-und-restore.sh` | 1.0.1 | eigenständiger Backup-Installer, SSH/SMB einschließlich Gastzugriff, optional verschlüsselte ZIP-Dateien, Cron und Wiederherstellung |
 | `kienzlezeit_v1.4.ino` | 1.4 | aktuelle M5Dial-Firmware mit wählbarem HTTP/HTTPS und optimierter Anzeige |
 
 ## Funktionsumfang
@@ -212,7 +212,7 @@ Nach erfolgreicher WLAN-Verbindung zeigt das M5Dial kurz seine IP-Adresse und we
 
 **Bei Nutzung als Zeiterfassung sind regelmäßige Backups dringend empfohlen.** Die Sicherung, die der Installer vor einer Aktualisierung erzeugt, ersetzt kein laufendes Backupkonzept.
 
-Das eigenständige Programm **`kienzlezeit-backup-und-restore.sh` v1.0** installiert fehlende
+Das eigenständige Programm **`kienzlezeit-backup-und-restore.sh` v1.0.1** installiert fehlende
 Voraussetzungen selbst. Es sichert beide Datenbanken (Auslagen, sofern vorhanden), die
 Terminal-Schlüsseldatei und ein Manifest mit Versionen und SHA-256-Prüfsummen.
 Die Anwendungs- und Firmwareversionen bleiben davon unabhängig.
@@ -227,7 +227,7 @@ sudo bash kienzlezeit-backup-und-restore.sh
 **Startbildschirm – Beispiel:**
 
 ```text
-kienzlezeit – Backup und Wiederherstellung v1.0
+kienzlezeit – Backup und Wiederherstellung v1.0.1
 von Dr. Thomas Kienzle
 
 Voraussetzungen geprueft. Fehlende Pakete wurden installiert.
@@ -244,6 +244,8 @@ Auswahl:
 ```
 
 - **Ziel:** SSH/SFTP mit eigenem Schlüssel und geprüftem Serverfingerabdruck oder SMB-Freigabe.
+  Bei SMB ist die Anmeldung mit Benutzer/Passwort oder als Gast ohne Passwort wählbar;
+  das NAS muss Gastzugriff mit Schreibrechten erlauben.
 - **Passwortschutz:** optional AES-256-ZIP; das Passwort separat aufbewahren. Es wird für
   unbeaufsichtigte Sicherungen root-geschützt außerhalb des Webverzeichnisses gespeichert.
 - **Aufbewahrung:** 30 Tage täglich; pro abgeschlossener Kalenderwoche bleibt eine

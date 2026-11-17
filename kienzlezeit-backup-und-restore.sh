@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # kienzlezeit – Backup und Wiederherstellung
-# Version: 1.0
+# Version: 1.0.1
 # Autor: Dr. Thomas Kienzle
-# Stand: 2026-11-16
+# Stand: 2026-11-17
 # Changelog (komplett):
+# - 1.0.1 (2026-11-17): Expliziter SMB-Gastzugriff ohne Passwortabfrage;
+#   bestehende Benutzeranmeldungen und ZIP-Passwortschutz bleiben unveraendert.
 # - 1.0 (2026-11-16): Eigenstaendiger Installer, SSH/SMB, AES-256-ZIP,
 #   Cron, 30 Tage taeglich / woechentlich unbegrenzt und gepruefter Restore.
 # Eine einzelne verteilbare Datei; Python-Standardbibliothek und PHP/libzip.
 set -Eeuo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 if [[ "${1:-}" == "--version" ]]; then
-  printf '%s\n' 'kienzlezeit Backup und Wiederherstellung 1.0'
+  printf '%s\n' 'kienzlezeit Backup und Wiederherstellung 1.0.1'
   exit 0
 fi
 if [[ "${1:-}" == "--help" ]]; then
@@ -48,7 +50,7 @@ import uuid
 import zipfile
 from zoneinfo import ZoneInfo
 
-VERSION = '1.0'
+VERSION = '1.0.1'
 SOURCE = Path(sys.argv[1]).resolve()
 CONFIG_DIR = Path('/etc/kienzlezeit-backup')
 CONFIG = CONFIG_DIR / 'config.json'
@@ -420,6 +422,8 @@ class Remote:
         self.c = config
         if config.get('transport') not in ('ssh', 'smb'):
             raise BackupError('Bitte zuerst den Speicherort konfigurieren.')
+        if config.get('transport') == 'smb' and config.get('smb_auth', 'password') not in ('password', 'guest'):
+            raise BackupError('Ungueltige SMB-Anmeldeart. Speicherort bitte erneut konfigurieren.')
 
     def command(self, command):
         c = self.c
@@ -434,16 +438,23 @@ class Remote:
                     c['username'] + '@' + c['host']]
             result = run(args, text_input=prefix + command + '\n', timeout=600, check=False)
         else:
-            with tempfile.TemporaryDirectory(prefix='smb-', dir=STATE) as td:
-                auth = Path(td) / 'auth'
-                for key in ('username', 'password', 'domain'):
-                    if any(x in c.get(key, '') for x in '\r\n\x00'):
-                        raise BackupError('Ungueltige SMB-Zugangsdaten.')
-                atomic_write(auth, f"username = {c['username']}\npassword = {c['password']}\ndomain = {c.get('domain', '')}\n")
-                args = ['smbclient', '//' + c['host'] + '/' + c['share'], '-A', str(auth),
-                        '--option=client min protocol=SMB2', '-m', 'SMB3', '-t', '60',
-                        '-c', (prefix + command).strip().replace('\n', ';')]
+            args = ['smbclient', '//' + c['host'] + '/' + c['share'],
+                    '--option=client min protocol=SMB2', '-m', 'SMB3', '-t', '60',
+                    '-c', (prefix + command).strip().replace('\n', ';')]
+            if c.get('smb_auth', 'password') == 'guest':
+                # Explicit empty password, no credentials file, prompt or cached
+                # Kerberos identity. Guest access must be allowed by the server.
+                args += ['-U', 'guest%', '-N', '--use-kerberos=off']
                 result = run(args, timeout=600, check=False)
+            else:
+                with tempfile.TemporaryDirectory(prefix='smb-', dir=STATE) as td:
+                    auth = Path(td) / 'auth'
+                    for key in ('username', 'password', 'domain'):
+                        if any(x in c.get(key, '') for x in '\r\n\x00'):
+                            raise BackupError('Ungueltige SMB-Zugangsdaten.')
+                    atomic_write(auth, f"username = {c['username']}\npassword = {c['password']}\ndomain = {c.get('domain', '')}\n")
+                    args += ['-A', str(auth)]
+                    result = run(args, timeout=600, check=False)
         if result.returncode or 'NT_STATUS_' in result.stdout + result.stderr:
             raise BackupError('Uebertragung fehlgeschlagen. Zielpfad, Rechte, Netzwerk und SSH-Fingerabdruck pruefen.')
         return result.stdout
@@ -486,6 +497,10 @@ class Remote:
 
 def target_id(config):
     fields = {k: config.get(k) for k in ('transport', 'host', 'port', 'share', 'directory', 'username')}
+    # Preserve existing 1.0 outbox IDs for password logins. Guest access is an
+    # explicit new target identity, never an implicit fallback for queued data.
+    if config.get('transport') == 'smb' and config.get('smb_auth') == 'guest':
+        fields['smb_auth'] = 'guest'
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -696,7 +711,7 @@ def enable_cron(config):
     run(['systemctl', 'enable', '--now', 'cron'])
     # Minute dispatcher implements Europe/Berlin independently of host timezone,
     # one successful job/day, missed-time catch-up and hourly retry after failure.
-    atomic_write(CRON, '# kienzlezeit Backup 1.0\nSHELL=/bin/sh\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\n* * * * * root /usr/local/sbin/kienzlezeit-backup-und-restore.sh --cron\n', 0o644)
+    atomic_write(CRON, f'# kienzlezeit Backup {VERSION}\nSHELL=/bin/sh\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\n* * * * * root /usr/local/sbin/kienzlezeit-backup-und-restore.sh --cron\n', 0o644)
     config['enabled'] = True
     save_config(config)
 
@@ -713,9 +728,21 @@ def configure_target(config):
     c['host'] = ask('Servername oder IPv4-Adresse')
     if not re.fullmatch('[A-Za-z0-9][A-Za-z0-9.-]*', c['host']):
         raise BackupError('Ungueltiger Servername (DNS-Name oder IPv4 verwenden).')
-    c['username'] = ask('Benutzername')
-    if not re.fullmatch('[A-Za-z0-9_][A-Za-z0-9_.@-]*', c['username']):
-        raise BackupError('Ungueltiger Benutzername.')
+    if choice == '2':
+        say('\nSMB-Anmeldung:\n  1  Benutzername und Passwort\n  2  Gastzugriff ohne Passwort')
+        auth_choice = ask('Auswahl', '1')
+        if auth_choice not in ('1', '2'):
+            raise BackupError('Bitte Anmeldeart 1 oder 2 waehlen.')
+        c['smb_auth'] = 'guest' if auth_choice == '2' else 'password'
+    else:
+        c.pop('smb_auth', None)
+    if c.get('smb_auth') == 'guest':
+        c.update(username='guest', password='', domain='')
+        say('Gastzugriff: keine Benutzer- oder Passwortabfrage.\nDas NAS muss Gastzugriff mit Schreibrechten erlauben.\nZIP-Verschluesselung bleibt separat waehlbar; sie schuetzt nicht vor dem Loeschen durch andere Gaeste.')
+    else:
+        c['username'] = ask('Benutzername')
+        if not re.fullmatch('[A-Za-z0-9_][A-Za-z0-9_.@-]*', c['username']):
+            raise BackupError('Ungueltiger Benutzername.')
     if choice == '1':
         apt_install(['openssh-client'])
         c['port'] = int(ask('SSH-Port', '22'))
@@ -746,8 +773,9 @@ def configure_target(config):
         if not re.fullmatch('[A-Za-z0-9_][A-Za-z0-9_. -]*', c['share']):
             raise BackupError('Ungueltiger Freigabename.')
         c['directory'] = safe_remote_path(ask('Vorhandenes Unterverzeichnis (leer = Freigabewurzel)'))
-        c['domain'] = ask('Domaene / Arbeitsgruppe (leer, falls nicht benoetigt)')
-        c['password'] = secret('SMB-Passwort')
+        if c['smb_auth'] == 'password':
+            c['domain'] = ask('Domaene / Arbeitsgruppe (leer, falls nicht benoetigt)')
+            c['password'] = secret('SMB-Passwort')
     c.setdefault('installation_id', uuid.uuid4().hex[:16])
     c['enabled'] = False
     c.setdefault('time', '02:00')
